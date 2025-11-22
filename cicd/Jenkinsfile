@@ -1,0 +1,49 @@
+pipeline {
+  agent any
+  environment {
+    IMAGE_REG = "docker.io/YOUR_DOCKERHUB_ID"
+    IMAGE = "${IMAGE_REG}/bookinfo"
+  }
+  stages {
+    stage('Checkout') { steps { checkout scm } }
+    stage('Build') {
+      steps { sh './cicd/pipeline-scripts/build.sh' }
+    }
+    stage('Unit Test') {
+      steps { sh './cicd/pipeline-scripts/test.sh' }
+      post { always { junit 'reports/**/*.xml' } }
+    }
+    stage('SonarQube') {
+      steps { sh './cicd/pipeline-scripts/sonar.sh' }
+    }
+    stage('Build Image & Scan') {
+      steps {
+        script {
+          def tag = "build-${env.BUILD_NUMBER}"
+          sh "docker build -t ${IMAGE}:${tag} ."
+          sh "./cicd/pipeline-scripts/trivy.sh ${IMAGE}:${tag}"
+          sh "docker push ${IMAGE}:${tag}"
+          env.IMAGE_TAG = "${tag}"
+        }
+      }
+    }
+    stage('Deploy to Dev') {
+      steps {
+        sh "kubectl create ns dev || true"
+        sh "helm upgrade --install bookinfo charts/bookinfo -n dev --set image.repository=${IMAGE} --set image.tag=${env.IMAGE_TAG}"
+      }
+    }
+    stage('Smoke Test') {
+      steps { sh './cicd/pipeline-scripts/smoke-test.sh dev' }
+    }
+    stage('Promote to QA') {
+      when { branch 'main' }
+      steps {
+        input message: "Approve deployment to QA?"
+        sh "kubectl create ns qa || true"
+        sh "helm upgrade --install bookinfo charts/bookinfo -n qa --set image.repository=${IMAGE} --set image.tag=${env.IMAGE_TAG}"
+      }
+    }
+  }
+  post { success { echo "Pipeline succeeded" } failure { echo "Pipeline failed" } }
+}
